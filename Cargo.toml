@@ -1,0 +1,21 @@
+[package]
+name = "nu_plugin_query_git"
+version = "0.1.0"
+authors = ["Darren Schroeder"]
+edition = "2021"
+repository = "https://github.com/fdncred/nu_plugin_query_git"
+description = "a nushell plugin called query_git"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gitql-ast = "0.7.0"
+# gitql-engine = "0.9.0"
+gitql-parser = "0.8.0"
+# for local development, you can use a path dependency
+nu-plugin = { path = "../nushell/crates/nu-plugin", version = "0.87.2"}
+nu-protocol = { path = "../nushell/crates/nu-protocol", version="0.87.2"}
+# nu-plugin = "0.80.0"
+# nu-protocol = "0.80.0"
+
