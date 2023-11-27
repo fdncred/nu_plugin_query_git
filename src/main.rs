@@ -4,7 +4,9 @@ use gitql_engine::engine;
 use gitql_parser::parser;
 use gitql_parser::tokenizer;
 use nu_plugin::{serve_plugin, EvaluatedCall, LabeledError, MsgPackSerializer, Plugin};
-use nu_protocol::{Category, PluginExample, PluginSignature, Record, Spanned, SyntaxShape, Value};
+use nu_protocol::{
+    record, Category, PluginExample, PluginSignature, Record, Spanned, SyntaxShape, Value,
+};
 use std::path::PathBuf;
 struct Implementation;
 
@@ -97,6 +99,7 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
         span: Some(span),
     })?;
 
+    eprintln!("git_repository: {:#?}", git_repository.path());
     git_repositories.push(git_repository);
 
     let front_start = std::time::Instant::now();
@@ -109,6 +112,7 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
 
     let tokens = tokenizer_result.ok().unwrap();
     let parser_result = parser::parse_gql(tokens);
+    // eprintln!("parser_result: {:#?}", parser_result);
     if parser_result.is_err() {
         // reporter.report_gql_error(parser_result.err().unwrap());
         // input.clear();
@@ -120,7 +124,6 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
 
     let engine_start = std::time::Instant::now();
     let evaluation_result = engine::evaluate(&git_repositories, statements);
-
     // Report Runtime exceptions if they exists
     if evaluation_result.is_err() {
         // reporter.report_runtime_error(evaluation_result.err().unwrap());
@@ -129,11 +132,16 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
     }
 
     let mut evaluation_values = evaluation_result.ok().unwrap();
-    let out_val = render_objects(
+    // let out_val = render_objects(
+    //     &mut evaluation_values.groups,
+    //     &evaluation_values.hidden_selections,
+    //     // false,
+    //     // 500,
+    // );
+
+    let out_val = render_objects2(
         &mut evaluation_values.groups,
         &evaluation_values.hidden_selections,
-        false,
-        500,
     );
 
     let engine_duration = engine_start.elapsed();
@@ -156,10 +164,18 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
 fn render_objects(
     groups: &mut Vec<Vec<GQLObject>>,
     hidden_selections: &[String],
-    pagination: bool,
-    page_size: usize,
+    // pagination: bool,
+    // page_size: usize,
 ) -> Value {
+    eprintln!("groups.len(): {:#?}", groups.len());
     if groups.len() > 1 {
+        // for x in groups.clone() {
+        //     for y in x {
+        //         for a in y.attributes.clone() {
+        //             eprintln!("a.0: {:#?} a.1: {:#?}", a.0, a.1.literal());
+        //         }
+        //     }
+        // }
         flat_gql_groups(groups);
     }
 
@@ -168,7 +184,7 @@ fn render_objects(
     }
 
     let gql_group = groups.first().unwrap();
-    let gql_group_len = gql_group.len();
+    // let gql_group_len = gql_group.len();
 
     let titles: Vec<&str> = groups[0][0]
         .attributes
@@ -177,6 +193,11 @@ fn render_objects(
         .map(|k| k.as_ref())
         .collect();
 
+    for x in groups[0].clone() {
+        for y in x.attributes.clone() {
+            eprintln!("key: {:#?} value: {:#?}", y.0, y.1.literal());
+        }
+    }
     // Setup table headers
     // let header_color = comfy_table::Color::Green;
     let mut table_headers = vec![];
@@ -214,65 +235,84 @@ fn render_objects(
     // }
 }
 
+fn render_objects2(groups: &mut Vec<Vec<GQLObject>>, hidden_selections: &[String]) -> Value {
+    eprintln!("render_objects2");
+    eprintln!("groups.len(): {:#?}", groups.len());
+    if groups.len() > 1 {
+        // for x in groups.clone() {
+        //     for y in x {
+        //         for a in y.attributes.clone() {
+        //             eprintln!("a.0: {:#?} a.1: {:#?}", a.0, a.1.literal());
+        //         }
+        //     }
+        // }
+        flat_gql_groups(groups);
+    }
+
+    if groups.is_empty() || groups[0].is_empty() {
+        return Value::test_nothing();
+    }
+
+    let gql_group = groups.first().unwrap();
+    // let gql_group_len = gql_group.len();
+
+    // let titles: Vec<&str> = groups[0][0]
+    //     .attributes
+    //     .keys()
+    //     .filter(|s| !hidden_selections.contains(s))
+    //     .map(|k| k.as_ref())
+    //     .collect();
+
+    let mut recs = vec![];
+    for a in groups[0].clone() {
+        let mut rec = Record::new();
+        for x in a.attributes.clone() {
+            eprintln!("x.0: {:#?} x.1: {:#?}", x.0, x.1.literal());
+            rec.push(x.0, Value::test_string(x.1.literal()));
+        }
+        recs.push(Value::test_record(rec));
+    }
+    eprintln!("rec: {:#?}", recs.clone());
+    // Value::test_nothing()
+    Value::test_list(recs)
+}
+
 fn print_group_as_table(
     titles: &Vec<&str>,
-    table_headers: Vec<&&str>, // Vec<comfy_table::Cell>,
+    table_headers: Vec<&&str>,
     group: &Vec<GQLObject>,
 ) -> Value {
     eprintln!("titles: {:#?}", titles);
     eprintln!("table_headers: {:#?}", table_headers);
 
-    // let mut table = comfy_table::Table::new();
     let mut table = vec![];
 
-    // Setup table style
-    // table.load_preset(comfy_table::presets::UTF8_FULL);
-    // table.apply_modifier(comfy_table::modifiers::UTF8_ROUND_CORNERS);
-    // table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
-
-    // table.set_header(table_headers);
-
+    let header_length = table_headers.len();
     // Add rows to the table
     for object in group {
-        //     let mut table_row = vec![];
-        for key in titles {
+        let mut table_row = vec![];
+        for (idx, key) in titles.iter().enumerate() {
+            let lookup = idx % header_length;
             let value = object.attributes.get(&key.to_string()).unwrap();
             let value_literal = value.literal();
-            // table_row.push(comfy_table::Cell::new(value_literal.as_str()));
-            // table_row.push(value_literal);
-            table.push(value_literal);
+            table_row.push((titles[lookup].to_string(), value_literal));
         }
-        //     table.push(table_row);
+        table.push(table_row);
     }
 
-    let mut rec = Record::new();
-    // rec.cols = table_headers.iter().map(|s| s.to_string()).collect();
-    // rec.vals = table
-    //     .iter()
-    //     .map(|v| Value::test_string(v.join(",")))
-    //     .collect();
-    table_headers.iter().zip(table.clone()).for_each(|(k, v)| {
-        rec.cols.push(k.to_string());
-        rec.vals.push(Value::test_string(v.to_string()));
-    });
+    let mut rec_list = vec![];
+
+    for row in &table {
+        let mut rec = Record::new();
+
+        for (head, val) in row {
+            rec.push(head, Value::test_string(val))
+        }
+        rec_list.push(Value::test_record(rec));
+    }
 
     // Print table
     eprintln!("table: {:#?}", table);
 
-    Value::test_list(vec![Value::test_record(rec)])
+    Value::test_list(rec_list)
 }
-
-// use nu_plugin::LabeledError;
-// use nu_protocol::{Span, Spanned, Value};
-
-// pub fn query_git_do_something(
-//     param: Option<Spanned<String>>,
-//     val: &str,
-//     value_span: Span,
-// ) -> Result<Value, LabeledError> {
-//     let a_val = match param {
-//         Some(p) => format!("Hello, {}! with value: {}", p.item, val),
-//         None => format!("Hello, Default! with value: {}", val),
-//     };
-//     Ok(Value::string(a_val, value_span))
-// }
