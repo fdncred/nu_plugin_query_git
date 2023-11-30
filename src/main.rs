@@ -6,14 +6,17 @@ use gitql_engine::engine;
 use gitql_parser::parser;
 use gitql_parser::tokenizer;
 use nu_plugin::{serve_plugin, EvaluatedCall, LabeledError, MsgPackSerializer, Plugin};
-use nu_protocol::{Category, PluginExample, PluginSignature, Record, Spanned, SyntaxShape, Value};
+use nu_protocol::{
+    Category, PluginExample, PluginSignature, Record, Span, Spanned, SyntaxShape, Value,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 struct StatementInfo {
     statement_name: String,
     // table_name and Vec<field_name>
-    table_info: (String, Vec<String>),
+    table_info: (String, Vec<String>, HashMap<String, String>),
 }
 
 struct Implementation;
@@ -113,25 +116,43 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
     // endregion: parameter validation
 
     // region: gql query
-    let front_start = std::time::Instant::now();
-    let tokenizer_result = tokenizer::tokenize(query);
-    if tokenizer_result.is_err() {
-        // reporter.report_gql_error(tokenizer_result.err().unwrap());
-        // input.clear();
-        // continue;
-    }
 
-    let tokens = tokenizer_result.ok().unwrap();
-    let parser_result = parser::parse_gql(tokens);
-    // eprintln!("parser_result: {:#?}", parser_result);
-    if parser_result.is_err() {
-        // reporter.report_gql_error(parser_result.err().unwrap());
-        // input.clear();
-        // continue;
-    }
+    let tokens = match tokenizer::tokenize(query) {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(LabeledError {
+                label: "error with tokenizer::tokenize()".to_string(),
+                msg: format!(
+                    "unable to tokenize query, error: {} at: {}, {}",
+                    e.message, e.location.start, e.location.end
+                ),
+                span: Some(Span::new(
+                    span.start + e.location.start + 1,
+                    span.start + e.location.end + 1,
+                )),
+            });
+        }
+    };
+
+    let statements = match parser::parse_gql(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("span: {:#?}", span);
+            return Err(LabeledError {
+                label: format!("{} error with parser::parse_gql()", e.message),
+                msg: format!(
+                    "unable to parse query, error: {} at: {}, {}",
+                    e.message, e.location.start, e.location.end
+                ),
+                span: Some(Span::new(
+                    span.start + e.location.start + 1,
+                    span.start + e.location.end + 1,
+                )),
+            });
+        }
+    };
 
     let mut statement_info = Vec::<StatementInfo>::new();
-    let statements = parser_result.ok().unwrap();
     statements.statements.iter().for_each(|s| {
         statement_info.push(StatementInfo {
             statement_name: s.0.to_string(),
@@ -144,26 +165,32 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
                             //     "select_stmt:\nalias: {:?}\ntable_name: {}\nfield_names: {:#?}\nis_distinct: {}",
                             //     st.alias_table, st.table_name, st.fields_names, st.is_distinct
                             // );
-                            (st.table_name.to_string(), st.fields_names.clone())
+                            (
+                                st.table_name.to_string(),
+                                st.fields_names.clone(),
+                                st.alias_table.clone(),
+                            )
                         }
                         None => panic!("downcast failed"),
                     };
                     st
                 }
-                StatementKind::Where => ("Where".into(), vec![]),
-                StatementKind::Having => ("Having".into(), vec![]),
-                StatementKind::Limit => ("Limit".into(), vec![]),
-                StatementKind::Offset => ("Offset".into(), vec![]),
-                StatementKind::OrderBy => ("OrderBy".into(), vec![]),
-                StatementKind::GroupBy => ("GroupBy".into(), vec![]),
-                StatementKind::AggregateFunction => ("AggregateFunction".into(), vec![]),
+                StatementKind::Where => ("Where".into(), vec![], HashMap::new()),
+                StatementKind::Having => ("Having".into(), vec![], HashMap::new()),
+                StatementKind::Limit => ("Limit".into(), vec![], HashMap::new()),
+                StatementKind::Offset => ("Offset".into(), vec![], HashMap::new()),
+                StatementKind::OrderBy => ("OrderBy".into(), vec![], HashMap::new()),
+                StatementKind::GroupBy => ("GroupBy".into(), vec![], HashMap::new()),
+                StatementKind::AggregateFunction => {
+                    ("AggregateFunction".into(), vec![], HashMap::new())
+                }
             },
         });
     });
     // eprintln!("statement_info: {:#?}", statement_info);
-    let front_duration = front_start.elapsed();
+    // let front_duration = front_start.elapsed();
 
-    let engine_start = std::time::Instant::now();
+    // let engine_start = std::time::Instant::now();
     let evaluation_result = engine::evaluate(&git_repositories, statements);
     // Report Runtime exceptions if they exists
     if evaluation_result.is_err() {
@@ -292,14 +319,14 @@ fn render_objects2(
     // eprintln!("render_objects2");
     // eprintln!("groups.len(): {:#?}", groups.len());
 
-    let mut table_info = ("".to_string(), vec![]);
+    let mut table_info = ("".to_string(), vec![], HashMap::new());
     for t in stmt_info {
         if t.statement_name == "select" {
             table_info = t.table_info;
             break;
         }
     }
-
+    eprintln!("table_info: {:#?}", table_info);
     if groups.len() > 1 {
         // for x in groups.clone() {
         //     for y in x {
@@ -369,32 +396,26 @@ fn render_objects2(
     for a in groups[0].clone() {
         let mut rec = Record::new();
         // for x in a.attributes.clone() {
-        // eprintln!("x.0: {:#?} x.1: {:#?}", x.0, x.1.literal());
+        //     eprintln!("x.0: {:#?} x.1: {:#?}", x.0, x.1.literal());
+        // }
         // if table_name == "commits"
         match table_info.0.as_str() {
             "refs" | "references" => {
                 if table_info.1.contains(&"name".to_string()) {
                     rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 }
-                // rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 if table_info.1.contains(&"full_name".to_string()) {
                     rec.push(
                         "full_name",
                         Value::test_string(a.attributes["full_name"].literal()),
                     );
                 }
-                // rec.push(
-                //     "full_name",
-                //     Value::test_string(a.attributes["full_name"].literal()),
-                // );
                 if table_info.1.contains(&"type".to_string()) {
                     rec.push("type", Value::test_string(a.attributes["type"].literal()));
                 }
-                // rec.push("type", Value::test_string(a.attributes["type"].literal()));
                 if table_info.1.contains(&"repo".to_string()) {
                     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 }
-                // rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "name".to_string(),
@@ -411,52 +432,49 @@ fn render_objects2(
             }
 
             "commits" => {
-                if table_info.1.contains(&"commit_id".to_string()) {
-                    rec.push(
-                        "commit_id",
-                        Value::test_string(a.attributes["commit_id"].literal()),
-                    );
+                // if table_info.1.contains(&"commit_id".to_string()) {
+                //     rec.push(
+                //         "commit_id",
+                //         Value::test_string(a.attributes["commit_id"].literal()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("commit_id", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                // rec.push(
-                //     "commit_id",
-                //     Value::test_string(a.attributes["commit_id"].literal()),
-                // );
                 if table_info.1.contains(&"title".to_string()) {
-                    rec.push("title", Value::test_string(a.attributes["title"].literal()));
+                    if table_info.2.contains_key("title") {
+                        let table_alias = table_info.2["title"].clone();
+                        rec.push(
+                            &table_alias,
+                            Value::test_string(a.attributes[&table_alias].literal()),
+                        );
+                    } else {
+                        rec.push("title", Value::test_string(a.attributes["title"].literal()));
+                    }
                 }
-                // rec.push("title", Value::test_string(a.attributes["title"].literal()));
                 if table_info.1.contains(&"message".to_string()) {
                     rec.push(
                         "message",
                         Value::test_string(a.attributes["message"].literal()),
                     );
                 }
-                // rec.push(
-                //     "message",
-                //     Value::test_string(a.attributes["message"].literal()),
-                // );
                 if table_info.1.contains(&"name".to_string()) {
                     rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 }
-                // rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 if table_info.1.contains(&"email".to_string()) {
                     rec.push("email", Value::test_string(a.attributes["email"].literal()));
                 }
-                // rec.push("email", Value::test_string(a.attributes["email"].literal()));
                 if table_info.1.contains(&"datetime".to_string()) {
                     rec.push(
                         "datetime",
                         Value::test_string(a.attributes["datetime"].literal()),
                     );
                 }
-                // rec.push(
-                //     "datetime",
-                //     Value::test_string(a.attributes["datetime"].literal()),
-                // );
                 if table_info.1.contains(&"repo".to_string()) {
                     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 }
-                // rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "commit_id".to_string(),
@@ -482,52 +500,33 @@ fn render_objects2(
                         Value::test_string(a.attributes["commit_id"].literal()),
                     );
                 }
-                // rec.push(
-                //     "commit_id",
-                //     Value::test_string(a.attributes["commit_id"].literal()),
-                // );
                 if table_info.1.contains(&"name".to_string()) {
                     rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 }
-                // rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 if table_info.1.contains(&"email".to_string()) {
                     rec.push("email", Value::test_string(a.attributes["email"].literal()));
                 }
-                // rec.push("email", Value::test_string(a.attributes["email"].literal()));
                 if table_info.1.contains(&"insertions".to_string()) {
                     rec.push(
                         "insertions",
                         Value::test_int(a.attributes["insertions"].as_int()),
                     );
                 }
-                // rec.push(
-                //     "insertions",
-                //     Value::test_int(a.attributes["insertions"].as_int()),
-                // );
                 if table_info.1.contains(&"deletions".to_string()) {
                     rec.push(
                         "deletions",
                         Value::test_int(a.attributes["deletions"].as_int()),
                     );
                 }
-                // rec.push(
-                //     "deletions",
-                //     Value::test_int(a.attributes["deletions"].as_int()),
-                // );
                 if table_info.1.contains(&"files_changed".to_string()) {
                     rec.push(
                         "files_changed",
                         Value::test_int(a.attributes["files_changed"].as_int()),
                     );
                 }
-                // rec.push(
-                //     "files_changed",
-                //     Value::test_int(a.attributes["files_changed"].as_int()),
-                // );
                 if table_info.1.contains(&"repo".to_string()) {
                     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 }
-                // rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "commit_id".to_string(),
@@ -550,41 +549,27 @@ fn render_objects2(
                 if table_info.1.contains(&"name".to_string()) {
                     rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 }
-                // rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 if table_info.1.contains(&"commit_count".to_string()) {
                     rec.push(
                         "commit_count",
                         Value::test_int(a.attributes["commit_count"].as_int()),
                     );
                 }
-                // rec.push(
-                //     "commit_count",
-                //     Value::test_int(a.attributes["commit_count"].as_int()),
-                // );
                 if table_info.1.contains(&"is_head".to_string()) {
                     rec.push(
                         "is_head",
                         Value::test_bool(a.attributes["is_head"].as_bool()),
                     );
                 }
-                // rec.push(
-                //     "is_head",
-                //     Value::test_bool(a.attributes["is_head"].as_bool()),
-                // );
                 if table_info.1.contains(&"is_remote".to_string()) {
                     rec.push(
                         "is_remote",
                         Value::test_bool(a.attributes["is_remote"].as_bool()),
                     );
                 }
-                // rec.push(
-                //     "is_remote",
-                //     Value::test_bool(a.attributes["is_remote"].as_bool()),
-                // );
                 if table_info.1.contains(&"repo".to_string()) {
                     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 }
-                // rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "name".to_string(),
@@ -604,11 +589,9 @@ fn render_objects2(
                 if table_info.1.contains(&"name".to_string()) {
                     rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 }
-                // rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 if table_info.1.contains(&"repo".to_string()) {
                     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 }
-                // rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = ["name".to_string(), "repo".to_string()];
                 the_rest.retain(|x| !standard_columns.contains(x));
@@ -618,8 +601,13 @@ fn render_objects2(
                     }
                 }
             }
-            _ => {} // rec.push(x.0, Value::test_string(x.1.literal()));
-                    // }
+            _ => {
+                if !table_info.1.clone().is_empty() {
+                    for x in table_info.1.clone() {
+                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                    }
+                }
+            }
         }
         recs.push(Value::test_record(rec));
     }
@@ -628,6 +616,55 @@ fn render_objects2(
     Value::test_list(recs)
 }
 
+fn get_column_record(
+    lookup: &str,
+    table_info: (String, Vec<String>, HashMap<String, String>),
+    gqlobj: &GQLObject,
+    output_type: &str,
+) -> Option<(String, Value)> {
+    // table_info.1 is the column name
+    // table_info.2 is the hashmap column_name: column_alias
+    if table_info.1.contains(&lookup.to_string()) {
+        if table_info.2.contains_key(lookup) {
+            let table_alias = table_info.2[lookup].clone();
+            let (rec_s, rec_v) = if output_type == "str" {
+                let rec_str = table_alias.to_string();
+                let rec_val = Value::test_string(gqlobj.attributes[&table_alias].literal());
+                (rec_str.to_string(), rec_val)
+            } else if output_type == "int" {
+                let rec_str = table_alias.to_string();
+                let rec_val = Value::test_int(gqlobj.attributes[&table_alias].as_int());
+                (rec_str, rec_val)
+            } else if output_type == "bool" {
+                let rec_str = table_alias.to_string();
+                let rec_val = Value::test_bool(gqlobj.attributes[&table_alias].as_bool());
+                (rec_str, rec_val)
+            } else {
+                ("".to_string(), Value::test_nothing())
+            };
+            return Some((rec_s, rec_v));
+        } else {
+            let (rec_s, rec_v) = if output_type == "str" {
+                let rec_str = lookup.to_string();
+                let rec_val = Value::test_string(gqlobj.attributes[lookup].literal());
+                (rec_str.to_string(), rec_val)
+            } else if output_type == "int" {
+                let rec_str = lookup.to_string();
+                let rec_val = Value::test_int(gqlobj.attributes[lookup].as_int());
+                (rec_str, rec_val)
+            } else if output_type == "bool" {
+                let rec_str = lookup.to_string();
+                let rec_val = Value::test_bool(gqlobj.attributes[lookup].as_bool());
+                (rec_str, rec_val)
+            } else {
+                ("".to_string(), Value::test_nothing())
+            };
+            return Some((rec_s, rec_v));
+        }
+    } else {
+        None
+    }
+}
 // fn print_group_as_table(
 //     titles: &Vec<&str>,
 //     table_headers: Vec<&&str>,
