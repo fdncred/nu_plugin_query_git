@@ -372,7 +372,7 @@ fn render_objects2(
         // eprintln!("x.0: {:#?} x.1: {:#?}", x.0, x.1.literal());
         // if table_name == "commits"
         match table_info.0.as_str() {
-            "references" => {
+            "refs" | "references" => {
                 if table_info.1.contains(&"name".to_string()) {
                     rec.push("name", Value::test_string(a.attributes["name"].literal()));
                 }
