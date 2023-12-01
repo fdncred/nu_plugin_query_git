@@ -1,5 +1,6 @@
 use gitql_ast::object::flat_gql_groups;
 use gitql_ast::object::GQLObject;
+use gitql_ast::statement::AggregationFunctionsStatement;
 use gitql_ast::statement::SelectStatement;
 use gitql_ast::statement::StatementKind;
 use gitql_engine::engine;
@@ -137,7 +138,7 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
     let statements = match parser::parse_gql(tokens) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("span: {:#?}", span);
+            // eprintln!("span: {:#?}", span);
             return Err(LabeledError {
                 label: format!("{} error with parser::parse_gql()", e.message),
                 msg: format!(
@@ -163,7 +164,7 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
                         Some(st) => {
                             // eprintln!(
                             //     "select_stmt:\nalias: {:?}\ntable_name: {}\nfield_names: {:#?}\nis_distinct: {}",
-                            //     st.alias_table, st.table_name, st.fields_names, st.is_distinct
+                            //     st.alias_table, st.table_name, st.fields_names, st.is_distinct,
                             // );
                             (
                                 st.table_name.to_string(),
@@ -182,7 +183,39 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
                 StatementKind::OrderBy => ("OrderBy".into(), vec![], HashMap::new()),
                 StatementKind::GroupBy => ("GroupBy".into(), vec![], HashMap::new()),
                 StatementKind::AggregateFunction => {
-                    ("AggregateFunction".into(), vec![], HashMap::new())
+                    let af = s.1;
+                    let af = match af.as_any().downcast_ref::<AggregationFunctionsStatement>() {
+                        Some(af) => {
+                            // eprintln!(
+                            //     "AggregateFunctionStatement:\naggregations: {:?}",
+                            //     af.aggregations
+                            //         .iter()
+                            //         .map(|(x, y)| {
+                            //             (
+                            //                 x.to_string(),
+                            //                 format!("{}|{}", y.function_name, y.argument),
+                            //             )
+                            //         })
+                            //         .collect::<Vec<_>>(),
+                            // );
+                            (
+                                "AggregateFunction".into(),
+                                vec![],
+                                af.aggregations
+                                    .iter()
+                                    .map(|(x, y)| {
+                                        (
+                                            x.to_string(),
+                                            format!("{}|{}", y.function_name, y.argument),
+                                        )
+                                    })
+                                    .collect::<HashMap<_, _>>(),
+                            )
+                        }
+                        None => panic!("downcast failed"),
+                    };
+                    af
+                    // ("AggregateFunction".into(), vec![], HashMap::new())
                 }
             },
         });
@@ -401,21 +434,45 @@ fn render_objects2(
         // if table_name == "commits"
         match table_info.0.as_str() {
             "refs" | "references" => {
-                if table_info.1.contains(&"name".to_string()) {
-                    rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // if table_info.1.contains(&"name".to_string()) {
+                //     rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("name", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"full_name".to_string()) {
-                    rec.push(
-                        "full_name",
-                        Value::test_string(a.attributes["full_name"].literal()),
-                    );
+
+                // if table_info.1.contains(&"full_name".to_string()) {
+                //     rec.push(
+                //         "full_name",
+                //         Value::test_string(a.attributes["full_name"].literal()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("full_name", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"type".to_string()) {
-                    rec.push("type", Value::test_string(a.attributes["type"].literal()));
+
+                // if table_info.1.contains(&"type".to_string()) {
+                //     rec.push("type", Value::test_string(a.attributes["type"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("type", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"repo".to_string()) {
-                    rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+
+                // if table_info.1.contains(&"repo".to_string()) {
+                //     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("repo", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
+
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "name".to_string(),
@@ -426,7 +483,16 @@ fn render_objects2(
                 the_rest.retain(|x| !standard_columns.contains(x));
                 if !the_rest.is_empty() {
                     for x in the_rest {
-                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        if let Some((rec_str, rec_val)) =
+                            get_column_record(&x, table_info.clone(), &a, "str")
+                        {
+                            // eprintln!("rec_str: {:#?} rec_val: {:#?}", rec_str, rec_val);
+                            rec.push(rec_str, rec_val);
+                        } else {
+                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        }
+
+                        // rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
                     }
                 }
             }
@@ -443,38 +509,74 @@ fn render_objects2(
                 {
                     rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"title".to_string()) {
-                    if table_info.2.contains_key("title") {
-                        let table_alias = table_info.2["title"].clone();
-                        rec.push(
-                            &table_alias,
-                            Value::test_string(a.attributes[&table_alias].literal()),
-                        );
-                    } else {
-                        rec.push("title", Value::test_string(a.attributes["title"].literal()));
-                    }
+                // if table_info.1.contains(&"title".to_string()) {
+                //     if table_info.2.contains_key("title") {
+                //         let table_alias = table_info.2["title"].clone();
+                //         rec.push(
+                //             &table_alias,
+                //             Value::test_string(a.attributes[&table_alias].literal()),
+                //         );
+                //     } else {
+                //         rec.push("title", Value::test_string(a.attributes["title"].literal()));
+                //     }
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("title", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"message".to_string()) {
-                    rec.push(
-                        "message",
-                        Value::test_string(a.attributes["message"].literal()),
-                    );
+
+                // if table_info.1.contains(&"message".to_string()) {
+                //     rec.push(
+                //         "message",
+                //         Value::test_string(a.attributes["message"].literal()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("message", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"name".to_string()) {
-                    rec.push("name", Value::test_string(a.attributes["name"].literal()));
+
+                // if table_info.1.contains(&"name".to_string()) {
+                //     rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("name", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"email".to_string()) {
-                    rec.push("email", Value::test_string(a.attributes["email"].literal()));
+
+                // if table_info.1.contains(&"email".to_string()) {
+                //     rec.push("email", Value::test_string(a.attributes["email"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("email", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"datetime".to_string()) {
-                    rec.push(
-                        "datetime",
-                        Value::test_string(a.attributes["datetime"].literal()),
-                    );
+
+                // if table_info.1.contains(&"datetime".to_string()) {
+                //     rec.push(
+                //         "datetime",
+                //         Value::test_string(a.attributes["datetime"].literal()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("datetime", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"repo".to_string()) {
-                    rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+
+                // if table_info.1.contains(&"repo".to_string()) {
+                //     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("repo", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
+
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "commit_id".to_string(),
@@ -488,45 +590,96 @@ fn render_objects2(
                 the_rest.retain(|x| !standard_columns.contains(x));
                 if !the_rest.is_empty() {
                     for x in the_rest {
-                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        if let Some((rec_str, rec_val)) =
+                            get_column_record(&x, table_info.clone(), &a, "str")
+                        {
+                            // eprintln!("rec_str: {:#?} rec_val: {:#?}", rec_str, rec_val);
+                            rec.push(rec_str, rec_val);
+                        } else {
+                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        }
+
+                        // rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
                     }
                 }
             }
 
             "diffs" => {
-                if table_info.1.contains(&"commit_id".to_string()) {
-                    rec.push(
-                        "commit_id",
-                        Value::test_string(a.attributes["commit_id"].literal()),
-                    );
+                // if table_info.1.contains(&"commit_id".to_string()) {
+                //     rec.push(
+                //         "commit_id",
+                //         Value::test_string(a.attributes["commit_id"].literal()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("commit_id", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"name".to_string()) {
-                    rec.push("name", Value::test_string(a.attributes["name"].literal()));
+
+                // if table_info.1.contains(&"name".to_string()) {
+                //     rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("name", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"email".to_string()) {
-                    rec.push("email", Value::test_string(a.attributes["email"].literal()));
+
+                // if table_info.1.contains(&"email".to_string()) {
+                //     rec.push("email", Value::test_string(a.attributes["email"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("email", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"insertions".to_string()) {
-                    rec.push(
-                        "insertions",
-                        Value::test_int(a.attributes["insertions"].as_int()),
-                    );
+
+                // if table_info.1.contains(&"insertions".to_string()) {
+                //     rec.push(
+                //         "insertions",
+                //         Value::test_int(a.attributes["insertions"].as_int()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("insertions", table_info.clone(), &a, "int")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"deletions".to_string()) {
-                    rec.push(
-                        "deletions",
-                        Value::test_int(a.attributes["deletions"].as_int()),
-                    );
+
+                // if table_info.1.contains(&"deletions".to_string()) {
+                //     rec.push(
+                //         "deletions",
+                //         Value::test_int(a.attributes["deletions"].as_int()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("deletions", table_info.clone(), &a, "int")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"files_changed".to_string()) {
-                    rec.push(
-                        "files_changed",
-                        Value::test_int(a.attributes["files_changed"].as_int()),
-                    );
+
+                // if table_info.1.contains(&"files_changed".to_string()) {
+                //     rec.push(
+                //         "files_changed",
+                //         Value::test_int(a.attributes["files_changed"].as_int()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("files_changed", table_info.clone(), &a, "int")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"repo".to_string()) {
-                    rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+
+                // if table_info.1.contains(&"repo".to_string()) {
+                //     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("repo", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
+
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "commit_id".to_string(),
@@ -540,36 +693,75 @@ fn render_objects2(
                 the_rest.retain(|x| !standard_columns.contains(x));
                 if !the_rest.is_empty() {
                     for x in the_rest {
-                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        if let Some((rec_str, rec_val)) =
+                            get_column_record(&x, table_info.clone(), &a, "str")
+                        {
+                            // eprintln!("rec_str: {:#?} rec_val: {:#?}", rec_str, rec_val);
+                            rec.push(rec_str, rec_val);
+                        } else {
+                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        }
+
+                        // rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
                     }
                 }
             }
 
             "branches" => {
-                if table_info.1.contains(&"name".to_string()) {
-                    rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // if table_info.1.contains(&"name".to_string()) {
+                //     rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("name", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"commit_count".to_string()) {
-                    rec.push(
-                        "commit_count",
-                        Value::test_int(a.attributes["commit_count"].as_int()),
-                    );
+
+                // if table_info.1.contains(&"commit_count".to_string()) {
+                //     rec.push(
+                //         "commit_count",
+                //         Value::test_int(a.attributes["commit_count"].as_int()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("commit_count", table_info.clone(), &a, "int")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"is_head".to_string()) {
-                    rec.push(
-                        "is_head",
-                        Value::test_bool(a.attributes["is_head"].as_bool()),
-                    );
+
+                // if table_info.1.contains(&"is_head".to_string()) {
+                //     rec.push(
+                //         "is_head",
+                //         Value::test_bool(a.attributes["is_head"].as_bool()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("is_head", table_info.clone(), &a, "bool")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"is_remote".to_string()) {
-                    rec.push(
-                        "is_remote",
-                        Value::test_bool(a.attributes["is_remote"].as_bool()),
-                    );
+
+                // if table_info.1.contains(&"is_remote".to_string()) {
+                //     rec.push(
+                //         "is_remote",
+                //         Value::test_bool(a.attributes["is_remote"].as_bool()),
+                //     );
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("is_remote", table_info.clone(), &a, "bool")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"repo".to_string()) {
-                    rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+
+                // if table_info.1.contains(&"repo".to_string()) {
+                //     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("repo", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
+
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = [
                     "name".to_string(),
@@ -581,23 +773,58 @@ fn render_objects2(
                 the_rest.retain(|x| !standard_columns.contains(x));
                 if !the_rest.is_empty() {
                     for x in the_rest {
-                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        // eprintln!(
+                        //     "x: {:#?} a: {:#?}",
+                        //     x,
+                        //     a.attributes.get(&x).is_some()
+                        // );
+                        if let Some((rec_str, rec_val)) =
+                            get_column_record(&x, table_info.clone(), &a, "str")
+                        {
+                            // eprintln!("rec_str: {:#?} rec_val: {:#?}", rec_str, rec_val);
+                            rec.push(rec_str, rec_val);
+                        } else {
+                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        }
+                        // rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
                     }
                 }
             }
+
             "tags" => {
-                if table_info.1.contains(&"name".to_string()) {
-                    rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // if table_info.1.contains(&"name".to_string()) {
+                //     rec.push("name", Value::test_string(a.attributes["name"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("name", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
-                if table_info.1.contains(&"repo".to_string()) {
-                    rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+
+                // if table_info.1.contains(&"repo".to_string()) {
+                //     rec.push("repo", Value::test_string(a.attributes["repo"].literal()));
+                // }
+                if let Some((rec_str, rec_val)) =
+                    get_column_record("repo", table_info.clone(), &a, "str")
+                {
+                    rec.push(rec_str, rec_val);
                 }
+
                 let mut the_rest = table_info.1.clone();
                 let standard_columns = ["name".to_string(), "repo".to_string()];
                 the_rest.retain(|x| !standard_columns.contains(x));
                 if !the_rest.is_empty() {
                     for x in the_rest {
-                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        if let Some((rec_str, rec_val)) =
+                            get_column_record(&x, table_info.clone(), &a, "str")
+                        {
+                            // eprintln!("rec_str: {:#?} rec_val: {:#?}", rec_str, rec_val);
+                            rec.push(rec_str, rec_val);
+                        } else {
+                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
+                        }
+
+                        // rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
                     }
                 }
             }
@@ -626,6 +853,7 @@ fn get_column_record(
     // table_info.2 is the hashmap column_name: column_alias
     if table_info.1.contains(&lookup.to_string()) {
         if table_info.2.contains_key(lookup) {
+            // eprintln!("in table_info.2 {}", lookup);
             let table_alias = table_info.2[lookup].clone();
             let (rec_s, rec_v) = if output_type == "str" {
                 let rec_str = table_alias.to_string();
@@ -644,6 +872,7 @@ fn get_column_record(
             };
             return Some((rec_s, rec_v));
         } else {
+            // eprintln!("not in table_info.2 {}", lookup);
             let (rec_s, rec_v) = if output_type == "str" {
                 let rec_str = lookup.to_string();
                 let rec_val = Value::test_string(gqlobj.attributes[lookup].literal());
