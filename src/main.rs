@@ -6,7 +6,9 @@ use gitql_ast::statement::StatementKind;
 use gitql_engine::engine;
 use gitql_parser::parser;
 use gitql_parser::tokenizer;
-use nu_plugin::{serve_plugin, EvaluatedCall, LabeledError, MsgPackSerializer, Plugin};
+use nu_plugin::{
+    serve_plugin, EngineInterface, EvaluatedCall, LabeledError, MsgPackSerializer, Plugin,
+};
 use nu_protocol::{
     Category, PluginExample, PluginSignature, Record, Span, Spanned, SyntaxShape, Value,
 };
@@ -42,9 +44,9 @@ impl Plugin for Implementation {
     }
 
     fn run(
-        &mut self,
+        &self,
         name: &str,
-        _config: &Option<Value>,
+        _engine: &EngineInterface,
         call: &EvaluatedCall,
         _input: &Value,
     ) -> Result<Value, LabeledError> {
