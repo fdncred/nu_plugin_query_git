@@ -8,6 +8,7 @@ use gitql_parser::parser;
 use gitql_parser::tokenizer;
 use nu_plugin::{
     serve_plugin, EngineInterface, EvaluatedCall, LabeledError, MsgPackSerializer, Plugin,
+    PluginCommand, SimplePluginCommand,
 };
 use nu_protocol::{
     Category, PluginExample, PluginSignature, Record, Span, Spanned, SyntaxShape, Value,
@@ -15,6 +16,13 @@ use nu_protocol::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+struct QueryGitPlugin;
+
+impl Plugin for QueryGitPlugin {
+    fn commands(&self) -> Vec<Box<dyn PluginCommand<Plugin = Self>>> {
+        vec![Box::new(Implementation)]
+    }
+}
 #[derive(Debug)]
 struct StatementInfo {
     statement_name: String,
@@ -24,15 +32,11 @@ struct StatementInfo {
 
 struct Implementation;
 
-impl Implementation {
-    fn new() -> Self {
-        Self {}
-    }
-}
+impl SimplePluginCommand for Implementation {
+    type Plugin = QueryGitPlugin;
 
-impl Plugin for Implementation {
-    fn signature(&self) -> Vec<PluginSignature> {
-        vec![PluginSignature::build("query git")
+    fn signature(&self) -> PluginSignature {
+        PluginSignature::build("query git")
             .usage("View query git results")
             .required("query", SyntaxShape::String, "GitQL query to run")
             .category(Category::Experimental)
@@ -40,17 +44,16 @@ impl Plugin for Implementation {
                 description: "This is the example descripion".into(),
                 example: "some pipeline involving query git".into(),
                 result: None,
-            }])]
+            }])
     }
 
     fn run(
         &self,
-        name: &str,
+        _config: &QueryGitPlugin,
         _engine: &EngineInterface,
         call: &EvaluatedCall,
         _input: &Value,
     ) -> Result<Value, LabeledError> {
-        assert_eq!(name, "query git");
         let query_arg: Spanned<String> = call.req(0)?;
 
         let ret_val = run_gitql_query(query_arg)?;
@@ -65,7 +68,7 @@ impl Plugin for Implementation {
 }
 
 fn main() {
-    serve_plugin(&mut Implementation::new(), MsgPackSerializer);
+    serve_plugin(&QueryGitPlugin, MsgPackSerializer);
 }
 
 fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
