@@ -7,11 +7,11 @@ use gitql_engine::engine;
 use gitql_parser::parser;
 use gitql_parser::tokenizer;
 use nu_plugin::{
-    serve_plugin, EngineInterface, EvaluatedCall, LabeledError, MsgPackSerializer, Plugin,
-    PluginCommand, SimplePluginCommand,
+    serve_plugin, EngineInterface, EvaluatedCall, MsgPackSerializer, Plugin, PluginCommand,
+    SimplePluginCommand,
 };
 use nu_protocol::{
-    Category, PluginExample, PluginSignature, Record, Span, Spanned, SyntaxShape, Value,
+    Category, Example, LabeledError, Record, Signature, Span, Spanned, SyntaxShape, Value,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,16 +35,26 @@ struct Implementation;
 impl SimplePluginCommand for Implementation {
     type Plugin = QueryGitPlugin;
 
-    fn signature(&self) -> PluginSignature {
-        PluginSignature::build("query git")
-            .usage("View query git results")
+    fn name(&self) -> &str {
+        "query git"
+    }
+
+    fn usage(&self) -> &str {
+        "View query git resultsn"
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::build(PluginCommand::name(self))
             .required("query", SyntaxShape::String, "GitQL query to run")
             .category(Category::Experimental)
-            .plugin_examples(vec![PluginExample {
-                description: "This is the example descripion".into(),
-                example: "some pipeline involving query git".into(),
-                result: None,
-            }])
+    }
+
+    fn examples(&self) -> Vec<Example> {
+        vec![Example {
+            description: "This is the example descripion".into(),
+            example: "some pipeline involving query git".into(),
+            result: None,
+        }]
     }
 
     fn run(
@@ -55,13 +65,7 @@ impl SimplePluginCommand for Implementation {
         _input: &Value,
     ) -> Result<Value, LabeledError> {
         let query_arg: Spanned<String> = call.req(0)?;
-
         let ret_val = run_gitql_query(query_arg)?;
-        //         return Err(LabeledError {
-        //             label: "Expected something from pipeline".into(),
-        //             msg: format!("requires some input, got {}", v.get_type()),
-        //             span: Some(call.head),
-        //         });
 
         Ok(ret_val)
     }
@@ -78,44 +82,40 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
 
     // region: parameter validation
     if !std::path::Path::new(&repository).exists() {
-        return Err(LabeledError {
-            label: "error with path".to_string(),
-            msg: format!("path does not exist [{}]", &repository),
-            span: Some(span),
-        });
+        return Err(
+            LabeledError::new(format!("path does not exist [{}]", &repository))
+                .with_label("error with path", span),
+        );
     }
 
-    let metadata = std::fs::metadata(&repository).map_err(|e| LabeledError {
-        label: "error with metadata".to_string(),
-        msg: format!("unable to get metadata for [{}], error: {}", &repository, e),
-        span: Some(span),
+    let metadata = std::fs::metadata(&repository).map_err(|e| {
+        LabeledError::new(format!(
+            "unable to get metadata for [{}], error: {}",
+            &repository, e
+        ))
+        .with_label("error with metadata", span)
     })?;
 
     // This path has to be a directory
     if !metadata.is_dir() {
-        return Err(LabeledError {
-            label: "error with directory".to_string(),
-            msg: format!("path is not a directory [{}]", &repository),
-            span: Some(span),
-        });
+        return Err(
+            LabeledError::new(format!("path is not a directory [{}]", &repository))
+                .with_label("error with directory", span),
+        );
     }
 
     let repo_path = match PathBuf::from(&repository).canonicalize() {
         Ok(p) => p,
         Err(e) => {
-            return Err(LabeledError {
-                label: format!("error canonicalizing [{}]", repository),
-                msg: e.to_string(),
-                span: Some(span),
-            });
+            return Err(LabeledError::new(e.to_string())
+                .with_label(format!("error canonicalizing [{}]", repository), span));
         }
     };
 
     let mut git_repositories: Vec<git2::Repository> = vec![];
-    let git_repository = git2::Repository::open(repo_path).map_err(|e| LabeledError {
-        label: format!("error opening repository [{}]", repository),
-        msg: e.message().to_string(),
-        span: Some(span),
+    let git_repository = git2::Repository::open(repo_path).map_err(|e| {
+        LabeledError::new(e.message())
+            .with_label(format!("error opening repository [{}]", repository), span)
     })?;
 
     // eprintln!("git_repository: {:#?}", git_repository.path());
@@ -127,35 +127,34 @@ fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
     let tokens = match tokenizer::tokenize(query) {
         Ok(t) => t,
         Err(e) => {
-            return Err(LabeledError {
-                label: "error with tokenizer::tokenize()".to_string(),
-                msg: format!(
-                    "unable to tokenize query, error: {} at: {}, {}",
-                    e.message, e.location.start, e.location.end
-                ),
-                span: Some(Span::new(
+            return Err(LabeledError::new(format!(
+                "unable to tokenize query, error: {} at: {}, {}",
+                e.message, e.location.start, e.location.end
+            ))
+            .with_label(
+                "error with tokenizer::tokenize()",
+                Span::new(
                     span.start + e.location.start + 1,
                     span.start + e.location.end + 1,
-                )),
-            });
+                ),
+            ));
         }
     };
 
     let statements = match parser::parse_gql(tokens) {
         Ok(p) => p,
         Err(e) => {
-            // eprintln!("span: {:#?}", span);
-            return Err(LabeledError {
-                label: format!("{} error with parser::parse_gql()", e.message),
-                msg: format!(
-                    "unable to parse query, error: {} at: {}, {}",
-                    e.message, e.location.start, e.location.end
-                ),
-                span: Some(Span::new(
+            return Err(LabeledError::new(format!(
+                "unable to parse query, error: {} at: {}, {}",
+                e.message, e.location.start, e.location.end
+            ))
+            .with_label(
+                format!("{} error with parser::parse_gql()", e.message),
+                Span::new(
                     span.start + e.location.start + 1,
                     span.start + e.location.end + 1,
-                )),
-            });
+                ),
+            ));
         }
     };
 
