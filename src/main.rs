@@ -40,7 +40,7 @@ impl SimplePluginCommand for Implementation {
     }
 
     fn usage(&self) -> &str {
-        "View query git resultsn"
+        "View query git results"
     }
 
     fn signature(&self) -> Signature {
@@ -60,12 +60,13 @@ impl SimplePluginCommand for Implementation {
     fn run(
         &self,
         _config: &QueryGitPlugin,
-        _engine: &EngineInterface,
+        engine: &EngineInterface,
         call: &EvaluatedCall,
         _input: &Value,
     ) -> Result<Value, LabeledError> {
+        let curdir = engine.get_current_dir()?;
         let query_arg: Spanned<String> = call.req(0)?;
-        let ret_val = run_gitql_query(query_arg)?;
+        let ret_val = run_gitql_query(query_arg, curdir)?;
 
         Ok(ret_val)
     }
@@ -75,10 +76,10 @@ fn main() {
     serve_plugin(&QueryGitPlugin, MsgPackSerializer);
 }
 
-fn run_gitql_query(query_arg: Spanned<String>) -> Result<Value, LabeledError> {
+fn run_gitql_query(query_arg: Spanned<String>, curdir: String) -> Result<Value, LabeledError> {
     let query = query_arg.item;
     let span = query_arg.span;
-    let repository = ".";
+    let repository = curdir;
 
     // region: parameter validation
     if !std::path::Path::new(&repository).exists() {
@@ -280,7 +281,7 @@ fn render_objects2(
             break;
         }
     }
-    eprintln!("table_info: {:#?}", table_info);
+    // eprintln!("table_info: {:#?}", table_info);
     if groups.len() > 1 {
         // for x in groups.clone() {
         //     for y in x {
