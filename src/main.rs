@@ -43,7 +43,7 @@ impl SimplePluginCommand for Implementation {
         "query git"
     }
 
-    fn usage(&self) -> &str {
+    fn description(&self) -> &str {
         "View query git results"
     }
 
