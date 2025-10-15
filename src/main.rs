@@ -53,7 +53,7 @@ impl SimplePluginCommand for Implementation {
             .category(Category::Experimental)
     }
 
-    fn examples(&self) -> Vec<Example> {
+    fn examples(&self) -> Vec<Example<'_>> {
         vec![Example {
             description: "This is the example descripion".into(),
             example: "some pipeline involving query git".into(),
