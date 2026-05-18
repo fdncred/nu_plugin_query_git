@@ -1,687 +1,721 @@
-use gitql_ast::object::flat_gql_groups;
-use gitql_ast::object::GQLObject;
-use gitql_ast::statement::AggregationFunctionsStatement;
-use gitql_ast::statement::SelectStatement;
-use gitql_ast::statement::StatementKind;
-use gitql_engine::engine;
-use gitql_parser::parser;
-use gitql_parser::tokenizer;
+#![deny(clippy::unwrap_used)]
+#![warn(clippy::unchecked_time_subtraction)]
+
+use crate::gitql_schema::{tables_fields_names, tables_fields_types};
+use gitql_cli::{arguments::Arguments, diagnostic_reporter, printer::OutputFormatKind};
+use gitql_core::{environment::Environment, object::GitQLObject, schema::Schema};
+use gitql_data_provider::GitDataProvider;
+use gitql_engine::{data_provider::DataProvider, engine, engine::EvaluationResult::SelectedGroups};
+use gitql_parser::diagnostic::Diagnostic;
+use gitql_parser::{parser, tokenizer};
+use gitql_std::aggregation::{aggregation_function_signatures, aggregation_functions};
 use nu_plugin::{
     serve_plugin, EngineInterface, EvaluatedCall, MsgPackSerializer, Plugin, PluginCommand,
     SimplePluginCommand,
 };
-use nu_protocol::{
-    Category, Example, LabeledError, Record, Signature, Span, Spanned, SyntaxShape, Value,
-};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use nu_protocol::{Category, Example, LabeledError, Signature, Span, SyntaxShape, Value};
+use std::path::Path;
 
-struct QueryGitPlugin;
+mod gitql_data_provider;
+mod gitql_functions;
+mod gitql_schema;
+mod nushell_render;
 
-impl Plugin for QueryGitPlugin {
+pub struct GitqlPlugin;
+
+impl Plugin for GitqlPlugin {
     fn version(&self) -> String {
+        // This automatically uses the version of your package from Cargo.toml as the plugin version
+        // sent to Nushell
         env!("CARGO_PKG_VERSION").into()
     }
 
     fn commands(&self) -> Vec<Box<dyn PluginCommand<Plugin = Self>>> {
-        vec![Box::new(Implementation)]
+        vec![
+            // Commands should be added here
+            Box::new(Gitql),
+        ]
     }
 }
-#[derive(Debug)]
-struct StatementInfo {
-    statement_name: String,
-    // table_name and Vec<field_name>
-    table_info: (String, Vec<String>, HashMap<String, String>),
-}
 
-struct Implementation;
+pub struct Gitql;
 
-impl SimplePluginCommand for Implementation {
-    type Plugin = QueryGitPlugin;
+impl SimplePluginCommand for Gitql {
+    type Plugin = GitqlPlugin;
 
     fn name(&self) -> &str {
         "query git"
     }
 
-    fn description(&self) -> &str {
-        "View query git results"
-    }
-
     fn signature(&self) -> Signature {
         Signature::build(PluginCommand::name(self))
-            .required("query", SyntaxShape::String, "GitQL query to run")
+            .required("query", SyntaxShape::String, "query string")
+            .named(
+                "repo",
+                SyntaxShape::String,
+                "Repository path to query",
+                Some('r'),
+            )
+            .named(
+                "repos",
+                SyntaxShape::List(Box::new(SyntaxShape::String)),
+                "Repository paths to query",
+                Some('R'),
+            )
+            .named(
+                "output",
+                SyntaxShape::String,
+                "Output format: table, json, csv, yaml",
+                Some('o'),
+            )
+            .named(
+                "page-size",
+                SyntaxShape::Int,
+                "Pagination page size",
+                Some('s'),
+            )
+            .switch(
+                "pagination",
+                "Limit output to a single page of results",
+                Some('p'),
+            )
+            .switch("analysis", "Show query analysis timings", Some('a'))
             .category(Category::Experimental)
     }
 
+    fn description(&self) -> &str {
+        "Use query git to query git repositories"
+    }
+
     fn examples(&self) -> Vec<Example<'_>> {
-        vec![Example {
-            description: "This is the example descripion".into(),
-            example: "some pipeline involving query git".into(),
-            result: None,
-        }]
+        vec![
+            Example {
+                example: "query git 'show tables'",
+                description: "Show the tables available to be queried",
+                result: None,
+            },
+            Example {
+                example: "query git 'select * from refs limit 10'",
+                description: "Show the first 10 refs",
+                result: None,
+            },
+            Example {
+                example: "query git 'describe commits' --output yaml",
+                description: "Show the commits schema as YAML (JSON, YAML, CSV)",
+                result: None,
+            },
+            Example {
+                example: "query git 'select title, datetime from commits' --repo . --output csv",
+                description: "Query commits from the current repo and return CSV (JSON, YAML, CSV)",
+                result: None,
+            },
+            Example {
+                example: "query git 'show tables' --repos [.]",
+                description: "Query multiple repositories using a Nushell list",
+                result: None,
+            },
+            Example {
+                example: "query git 'select * from refs' --pagination --page-size 20",
+                description: "Limit output to the first 20 rows of results",
+                result: None,
+            },
+            Example {
+                example: "query git 'select count(*) from commits' --analysis",
+                description: "Run a query and print analysis timing information",
+                result: None,
+            },
+            Example {
+                example: r#"query git 'SELECT title, datetime FROM commits WHERE commit_conventional(title) = "feat"'"#,
+                description: "Show title and datetime of commits with conventional title 'feat'",
+                result: None,
+            },
+        ]
     }
 
     fn run(
         &self,
-        _config: &QueryGitPlugin,
+        _plugin: &GitqlPlugin,
         engine: &EngineInterface,
         call: &EvaluatedCall,
         _input: &Value,
     ) -> Result<Value, LabeledError> {
         let curdir = engine.get_current_dir()?;
-        let query_arg: Spanned<String> = call.req(0)?;
-        let ret_val = run_gitql_query(query_arg, curdir)?;
+        let query_string: String = call.req(0)?;
 
-        Ok(ret_val)
+        let repo_flag: Option<String> = call
+            .get_flag("repo")
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+        let repos_flag: Option<Value> = call
+            .get_flag("repos")
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+        let output_flag: Option<String> = call
+            .get_flag("output")
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+        let page_size_flag: Option<i64> = call
+            .get_flag("page-size")
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+        let pagination = call
+            .has_flag("pagination")
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+        let analysis = call
+            .has_flag("analysis")
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+
+        let repo_paths = parse_repo_paths(&curdir, repo_flag, repos_flag)?;
+        let output_format = resolve_output_format(output_flag);
+
+        let query_arguments = Arguments {
+            repos: repo_paths,
+            output_format,
+            pagination,
+            page_size: page_size_flag.unwrap_or(10).max(1) as usize,
+            analysis,
+            enable_line_editor: false,
+        };
+
+        let mut reporter = diagnostic_reporter::DiagnosticReporter::default();
+        if let Some(schema_value) =
+            render_schema_query(&query_string, &query_arguments.output_format)
+        {
+            return Ok(schema_value);
+        }
+
+        let repos = match validate_git_repositories(&query_arguments.repos) {
+            Ok(repos) => repos,
+            Err(error) => {
+                reporter.report_diagnostic(&query_string, Diagnostic::error(error.as_str()));
+                return Err(LabeledError::new("Invalid repositories paths"));
+            }
+        };
+        let schema = Schema {
+            tables_fields_names: tables_fields_names().to_owned(),
+            tables_fields_types: tables_fields_types().to_owned(),
+        };
+
+        let std_signatures = gitql_functions::gitql_std_signatures();
+        let std_functions = gitql_functions::gitql_std_functions();
+
+        let aggregation_signatures = aggregation_function_signatures();
+        let aggregation_functions = aggregation_functions();
+
+        let mut env = Environment::new(schema);
+        env.with_standard_functions(&std_signatures, std_functions);
+        env.with_aggregation_functions(&aggregation_signatures, aggregation_functions);
+
+        execute_gitql_query(query_string, &query_arguments, &repos, &mut env)
+
+        // Ok(Value::nothing(call.head))
     }
 }
 
 fn main() {
-    serve_plugin(&QueryGitPlugin, MsgPackSerializer);
+    serve_plugin(&GitqlPlugin, MsgPackSerializer);
 }
 
-fn run_gitql_query(query_arg: Spanned<String>, curdir: String) -> Result<Value, LabeledError> {
-    let query = query_arg.item;
-    let span = query_arg.span;
-    let repository = curdir;
-
-    // region: parameter validation
-    if !std::path::Path::new(&repository).exists() {
-        return Err(
-            LabeledError::new(format!("path does not exist [{}]", &repository))
-                .with_label("error with path", span),
-        );
-    }
-
-    let metadata = std::fs::metadata(&repository).map_err(|e| {
-        LabeledError::new(format!(
-            "unable to get metadata for [{}], error: {}",
-            &repository, e
-        ))
-        .with_label("error with metadata", span)
-    })?;
-
-    // This path has to be a directory
-    if !metadata.is_dir() {
-        return Err(
-            LabeledError::new(format!("path is not a directory [{}]", &repository))
-                .with_label("error with directory", span),
-        );
-    }
-
-    let repo_path = match PathBuf::from(&repository).canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(LabeledError::new(e.to_string())
-                .with_label(format!("error canonicalizing [{}]", repository), span));
+fn execute_gitql_query(
+    query: String,
+    query_arguments: &Arguments,
+    repos: &[gix::Repository],
+    env: &mut Environment,
+) -> Result<Value, LabeledError> {
+    let front_start = std::time::Instant::now();
+    let normalized_query = normalize_query(&query);
+    let tokens = match tokenizer::Tokenizer::tokenize(&normalized_query) {
+        Ok(tokens) => tokens,
+        Err(diagnostic) => {
+            let diagnostic = *diagnostic;
+            return Err(diagnostic_to_labeled_error(&query, diagnostic));
         }
     };
+    if tokens.is_empty() {
+        return Err(LabeledError::new("No tokens to parse"));
+    }
 
-    let mut git_repositories: Vec<git2::Repository> = vec![];
-    let git_repository = git2::Repository::open(repo_path).map_err(|e| {
-        LabeledError::new(e.message())
-            .with_label(format!("error opening repository [{}]", repository), span)
-    })?;
+    // eprintln!("3");
+    let query_node = match parser::parse_gql(tokens, env) {
+        Ok(query_node) => query_node,
+        Err(diagnostic) => {
+            let diagnostic = *diagnostic;
+            return Err(diagnostic_to_labeled_error(&query, diagnostic));
+        }
+    };
+    let front_duration = front_start.elapsed();
 
-    // eprintln!("git_repository: {:#?}", git_repository.path());
-    git_repositories.push(git_repository);
-    // endregion: parameter validation
-
-    // region: gql query
-
-    let tokens = match tokenizer::tokenize(query) {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(LabeledError::new(format!(
-                "unable to tokenize query, error: {} at: {}, {}",
-                e.message, e.location.start, e.location.end
-            ))
-            .with_label(
-                "error with tokenizer::tokenize()",
-                Span::new(
-                    span.start + e.location.start + 1,
-                    span.start + e.location.end + 1,
-                ),
+    let engine_start = std::time::Instant::now();
+    let provider: Box<dyn DataProvider> = Box::new(GitDataProvider::new(repos.to_vec()));
+    let engine_results = match engine::evaluate(env, &provider, query_node) {
+        Ok(results) => results,
+        Err(error) => {
+            return Err(diagnostic_to_labeled_error(
+                &query,
+                Diagnostic::exception(&error),
             ));
         }
     };
 
-    let statements = match parser::parse_gql(tokens) {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(LabeledError::new(format!(
-                "unable to parse query, error: {} at: {}, {}",
-                e.message, e.location.start, e.location.end
-            ))
-            .with_label(
-                format!("{} error with parser::parse_gql()", e.message),
-                Span::new(
-                    span.start + e.location.start + 1,
-                    span.start + e.location.end + 1,
-                ),
-            ));
+    // eprintln!("5");
+
+    // Render the result only if they are selected groups not any other statement
+    let engine_result = engine_results.into_iter().last();
+    let output: Value = if let Some(SelectedGroups(mut groups)) = engine_result {
+        if query_arguments.pagination {
+            apply_pagination(&mut groups, query_arguments.page_size);
         }
-    };
 
-    let mut statement_info = Vec::<StatementInfo>::new();
-    statements.statements.iter().for_each(|s| {
-        statement_info.push(StatementInfo {
-            statement_name: s.0.to_string(),
-            table_info: match s.1.get_statement_kind() {
-                StatementKind::Select => {
-                    let st = s.1;
-                    let st = match st.as_any().downcast_ref::<SelectStatement>() {
-                        Some(st) => {
-                            // eprintln!(
-                            //     "select_stmt:\nalias: {:?}\ntable_name: {}\nfield_names: {:#?}\nis_distinct: {}",
-                            //     st.alias_table, st.table_name, st.fields_names, st.is_distinct,
-                            // );
-                            (
-                                st.table_name.to_string(),
-                                st.fields_names.clone(),
-                                st.alias_table.clone(),
-                            )
-                        }
-                        None => panic!("downcast failed"),
-                    };
-                    st
-                }
-                StatementKind::Where => ("Where".into(), vec![], HashMap::new()),
-                StatementKind::Having => ("Having".into(), vec![], HashMap::new()),
-                StatementKind::Limit => ("Limit".into(), vec![], HashMap::new()),
-                StatementKind::Offset => ("Offset".into(), vec![], HashMap::new()),
-                StatementKind::OrderBy => ("OrderBy".into(), vec![], HashMap::new()),
-                StatementKind::GroupBy => ("GroupBy".into(), vec![], HashMap::new()),
-                StatementKind::AggregateFunction => {
-                    let af = s.1;
-                    let af = match af.as_any().downcast_ref::<AggregationFunctionsStatement>() {
-                        Some(af) => {
-                            // eprintln!(
-                            //     "AggregateFunctionStatement:\naggregations: {:?}",
-                            //     af.aggregations
-                            //         .iter()
-                            //         .map(|(x, y)| {
-                            //             (
-                            //                 x.to_string(),
-                            //                 format!("{}|{}", y.function_name, y.argument),
-                            //             )
-                            //         })
-                            //         .collect::<Vec<_>>(),
-                            // );
-                            (
-                                "AggregateFunction".into(),
-                                vec![],
-                                af.aggregations
-                                    .iter()
-                                    .map(|(x, y)| {
-                                        (
-                                            x.to_string(),
-                                            format!("{}|{}", y.function_name, y.argument),
-                                        )
-                                    })
-                                    .collect::<HashMap<_, _>>(),
-                            )
-                        }
-                        None => panic!("downcast failed"),
-                    };
-                    af
-                }
-            },
-        });
-    });
-    // eprintln!("statement_info: {:#?}", statement_info);
-    let evaluation_result = engine::evaluate(&git_repositories, statements);
-    // Report Runtime exceptions if they exists
-    if evaluation_result.is_err() {
-        // reporter.report_runtime_error(evaluation_result.err().unwrap());
-        // input.clear();
-        // continue;
-    }
-
-    let mut evaluation_values = evaluation_result.ok().unwrap();
-    // let out_val = render_objects(
-    //     &mut evaluation_values.groups,
-    //     &evaluation_values.hidden_selections,
-    //     // false,
-    //     // 500,
-    // );
-
-    // endregion: gql query
-
-    // region: gql output to nushell values
-    let out_val = render_objects2(
-        &mut evaluation_values.groups,
-        // &evaluation_values.hidden_selections,
-        statement_info,
-    );
-
-    // let debug = true;
-    // if debug {
-    //     eprintln!("\n");
-    //     eprintln!("Analysis:");
-    //     eprintln!("Frontend : {:?}", front_duration);
-    //     eprintln!("Engine   : {:?}", engine_duration);
-    //     eprintln!("Total    : {:?}", (front_duration + engine_duration));
-    //     eprintln!("\n");
-    // }
-
-    // endregion: gql output to nushell values
-
-    Ok(out_val)
-}
-
-fn render_objects2(
-    groups: &mut Vec<Vec<GQLObject>>,
-    // hidden_selections: &[String],
-    stmt_info: Vec<StatementInfo>,
-) -> Value {
-    // eprintln!("render_objects2");
-    // eprintln!("groups.len(): {:#?}", groups.len());
-
-    let mut table_info = ("".to_string(), vec![], HashMap::new());
-    for t in stmt_info {
-        if t.statement_name == "select" {
-            table_info = t.table_info;
-            break;
-        }
-    }
-    // eprintln!("table_info: {:#?}", table_info);
-    if groups.len() > 1 {
-        // for x in groups.clone() {
-        //     for y in x {
-        //         for a in y.attributes.clone() {
-        //             eprintln!("a.0: {:#?} a.1: {:#?}", a.0, a.1.literal());
-        //         }
-        //     }
-        // }
-        flat_gql_groups(groups);
-    }
-
-    if groups.is_empty() || groups[0].is_empty() {
-        return Value::test_nothing();
-    }
-
-    // let gql_group = groups.first().unwrap();
-    // let gql_group_len = gql_group.len();
-
-    // let titles: Vec<&str> = groups[0][0]
-    //     .attributes
-    //     .keys()
-    //     .filter(|s| !hidden_selections.contains(s))
-    //     .map(|k| k.as_ref())
-    //     .collect();
-
-    // References table
-    // Name	        Type	Description
-    // name	        Text	Reference name
-    // full_name	Text	Reference full name
-    // type	        Text	Reference type
-    // repo	        Text	Repository full path
-
-    // Commits table
-    // Name	        Type	Description
-    // commit_id	Text	Commit id
-    // title	    Text	Commit title
-    // message	    Text	Commit full message
-    // name	        Text	Author name
-    // email	    Text	Author email
-    // datetime	    Date	Commit date time
-    // repo	        Text	Repository full path
-
-    // Diffs table
-    // Name	            Type	Description
-    // commit_id	    Text	Commit id
-    // name	            Text	Author name
-    // email	        Text	Author email
-    // insertions	    Number	Number of inserted lines
-    // deletions	    Number	Number of deleted lines
-    // files_changed	Number	Number of file changed
-    // repo	            Text	Repository full path
-
-    // Branches table
-    // Name	        Type	    Description
-    // name	        Text	    Branch name
-    // commit_count	Number	    Number of commits in this branch
-    // is_head	    Bool	    Is the head branch
-    // is_remote	Bool	    Is a remote branch
-    // repo	        Text	    Repository full path
-
-    // Tags table
-    // Name	    Type	Description
-    // name	    Text	Tag name
-    // repo	    Text	Repository full path
-
-    let mut recs = vec![];
-    for a in groups[0].clone() {
-        let mut rec = Record::new();
-        // for x in a.attributes.clone() {
-        //     eprintln!("x.0: {:#?} x.1: {:#?}", x.0, x.1.literal());
-        // }
-        // if table_name == "commits"
-        match table_info.0.as_str() {
-            "refs" | "references" => {
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("name", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("full_name", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("type", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("repo", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                let mut the_rest = table_info.1.clone();
-                let standard_columns = [
-                    "name".to_string(),
-                    "full_name".to_string(),
-                    "type".to_string(),
-                    "repo".to_string(),
-                ];
-                the_rest.retain(|x| !standard_columns.contains(x));
-                if !the_rest.is_empty() {
-                    for x in the_rest {
-                        if let Some((rec_str, rec_val)) =
-                            get_column_record(&x, table_info.clone(), &a, "str")
-                        {
-                            rec.push(rec_str, rec_val);
-                        } else {
-                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
-                        }
-                    }
+        match query_arguments.output_format {
+            OutputFormatKind::Table => nushell_render::render_objects(&mut groups),
+            OutputFormatKind::JSON => {
+                if let Some(json) = nushell_render::render_groups_to_json(&mut groups) {
+                    Value::test_string(json)
+                } else {
+                    Value::test_string("No JSON data to show".to_string())
                 }
             }
-
-            "commits" => {
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("commit_id", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("title", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("message", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("name", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("email", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("datetime", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("repo", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                let mut the_rest = table_info.1.clone();
-                let standard_columns = [
-                    "commit_id".to_string(),
-                    "title".to_string(),
-                    "message".to_string(),
-                    "name".to_string(),
-                    "email".to_string(),
-                    "datetime".to_string(),
-                    "repo".to_string(),
-                ];
-                the_rest.retain(|x| !standard_columns.contains(x));
-                if !the_rest.is_empty() {
-                    for x in the_rest {
-                        if let Some((rec_str, rec_val)) =
-                            get_column_record(&x, table_info.clone(), &a, "str")
-                        {
-                            rec.push(rec_str, rec_val);
-                        } else {
-                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
-                        }
-                    }
+            OutputFormatKind::YAML => {
+                if let Some(yaml) = nushell_render::render_groups_to_yaml(&mut groups) {
+                    Value::test_string(yaml)
+                } else {
+                    Value::test_string("No YAML data to show".to_string())
                 }
             }
-
-            "diffs" => {
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("commit_id", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("name", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("email", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("insertions", table_info.clone(), &a, "int")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("deletions", table_info.clone(), &a, "int")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("files_changed", table_info.clone(), &a, "int")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("repo", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                let mut the_rest = table_info.1.clone();
-                let standard_columns = [
-                    "commit_id".to_string(),
-                    "name".to_string(),
-                    "email".to_string(),
-                    "insertions".to_string(),
-                    "deletions".to_string(),
-                    "files_changed".to_string(),
-                    "repo".to_string(),
-                ];
-                the_rest.retain(|x| !standard_columns.contains(x));
-                if !the_rest.is_empty() {
-                    for x in the_rest {
-                        if let Some((rec_str, rec_val)) =
-                            get_column_record(&x, table_info.clone(), &a, "str")
-                        {
-                            rec.push(rec_str, rec_val);
-                        } else {
-                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
-                        }
-                    }
+            OutputFormatKind::CSV => {
+                if let Some(csv) = nushell_render::render_groups_to_csv(&mut groups) {
+                    Value::test_string(csv)
+                } else {
+                    Value::test_string("No CSV data to show".to_string())
                 }
             }
-
-            "branches" => {
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("name", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("commit_count", table_info.clone(), &a, "int")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("is_head", table_info.clone(), &a, "bool")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("is_remote", table_info.clone(), &a, "bool")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("repo", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                let mut the_rest = table_info.1.clone();
-                let standard_columns = [
-                    "name".to_string(),
-                    "commit_count".to_string(),
-                    "is_head".to_string(),
-                    "is_remote".to_string(),
-                    "repo".to_string(),
-                ];
-                the_rest.retain(|x| !standard_columns.contains(x));
-                if !the_rest.is_empty() {
-                    for x in the_rest {
-                        if let Some((rec_str, rec_val)) =
-                            get_column_record(&x, table_info.clone(), &a, "str")
-                        {
-                            rec.push(rec_str, rec_val);
-                        } else {
-                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
-                        }
-                    }
-                }
-            }
-
-            "tags" => {
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("name", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                if let Some((rec_str, rec_val)) =
-                    get_column_record("repo", table_info.clone(), &a, "str")
-                {
-                    rec.push(rec_str, rec_val);
-                }
-
-                let mut the_rest = table_info.1.clone();
-                let standard_columns = ["name".to_string(), "repo".to_string()];
-                the_rest.retain(|x| !standard_columns.contains(x));
-                if !the_rest.is_empty() {
-                    for x in the_rest {
-                        if let Some((rec_str, rec_val)) =
-                            get_column_record(&x, table_info.clone(), &a, "str")
-                        {
-                            rec.push(rec_str, rec_val);
-                        } else {
-                            rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
-                        }
-                    }
-                }
-            }
-            _ => {
-                if !table_info.1.clone().is_empty() {
-                    for x in table_info.1.clone() {
-                        rec.push(x.clone(), Value::test_string(a.attributes[&x].literal()));
-                    }
-                }
-            }
-        }
-        recs.push(Value::test_record(rec));
-    }
-
-    Value::test_list(recs)
-}
-
-fn get_column_record(
-    lookup: &str,
-    table_info: (String, Vec<String>, HashMap<String, String>),
-    gqlobj: &GQLObject,
-    output_type: &str,
-) -> Option<(String, Value)> {
-    // table_info.1 is the column name
-    // table_info.2 is the hashmap column_name: column_alias
-    if table_info.1.contains(&lookup.to_string()) {
-        if table_info.2.contains_key(lookup) {
-            // eprintln!("in table_info.2 {}", lookup);
-            let table_alias = table_info.2[lookup].clone();
-            let (rec_s, rec_v) = if output_type == "str" {
-                let rec_str = table_alias.to_string();
-                let rec_val = Value::test_string(gqlobj.attributes[&table_alias].literal());
-                (rec_str.to_string(), rec_val)
-            } else if output_type == "int" {
-                let rec_str = table_alias.to_string();
-                let rec_val = Value::test_int(gqlobj.attributes[&table_alias].as_int());
-                (rec_str, rec_val)
-            } else if output_type == "bool" {
-                let rec_str = table_alias.to_string();
-                let rec_val = Value::test_bool(gqlobj.attributes[&table_alias].as_bool());
-                (rec_str, rec_val)
-            } else {
-                ("".to_string(), Value::test_nothing())
-            };
-            return Some((rec_s, rec_v));
-        } else {
-            // eprintln!("not in table_info.2 {}", lookup);
-            let (rec_s, rec_v) = if output_type == "str" {
-                let rec_str = lookup.to_string();
-                let rec_val = Value::test_string(gqlobj.attributes[lookup].literal());
-                (rec_str.to_string(), rec_val)
-            } else if output_type == "int" {
-                let rec_str = lookup.to_string();
-                let rec_val = Value::test_int(gqlobj.attributes[lookup].as_int());
-                (rec_str, rec_val)
-            } else if output_type == "bool" {
-                let rec_str = lookup.to_string();
-                let rec_val = Value::test_bool(gqlobj.attributes[lookup].as_bool());
-                (rec_str, rec_val)
-            } else {
-                ("".to_string(), Value::test_nothing())
-            };
-            return Some((rec_s, rec_v));
         }
     } else {
-        None
+        // eprintln!("7");
+
+        Value::test_string("Not a SelectedGroups result".to_string())
+    };
+
+    let engine_duration = engine_start.elapsed();
+
+    if query_arguments.analysis {
+        eprintln!("\n");
+        eprintln!("Analysis:");
+        eprintln!("Frontend : {:?}", front_duration);
+        eprintln!("Engine   : {:?}", engine_duration);
+        eprintln!("Total    : {:?}", (front_duration + engine_duration));
+        eprintln!("\n");
+    }
+
+    Ok(output)
+}
+
+fn apply_pagination(groups: &mut GitQLObject, page_size: usize) {
+    if page_size == 0 {
+        return;
+    }
+
+    for group in &mut groups.groups {
+        if group.rows.len() > page_size {
+            group.rows.truncate(page_size);
+        }
+    }
+}
+
+fn normalize_query(query: &str) -> String {
+    let mut normalized = String::with_capacity(query.len());
+    let lower_query = query.to_lowercase();
+    let mut index = 0;
+
+    while let Some(start) = lower_query[index..].find("count") {
+        let start = index + start;
+        normalized.push_str(&query[index..start]);
+
+        let mut pos = start + "count".len();
+        while pos < query.len() && query.as_bytes()[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+
+        if pos < query.len() && query.as_bytes()[pos] == b'(' {
+            let mut closing = pos + 1;
+            let mut has_star = false;
+            let mut valid = true;
+            while closing < query.len() {
+                let c = query.as_bytes()[closing];
+                if c == b')' {
+                    break;
+                }
+                if !c.is_ascii_whitespace() {
+                    if c == b'*' {
+                        has_star = true;
+                    } else {
+                        valid = false;
+                    }
+                }
+                closing += 1;
+            }
+
+            if valid && has_star && closing < query.len() && query.as_bytes()[closing] == b')' {
+                normalized.push_str("count(1)");
+                index = closing + 1;
+                continue;
+            }
+        }
+
+        normalized.push_str(&query[start..start + "count".len()]);
+        index = start + "count".len();
+    }
+
+    normalized.push_str(&query[index..]);
+    normalized
+}
+
+fn render_schema_query(query: &str, output_format: &OutputFormatKind) -> Option<Value> {
+    let normalized = query.trim();
+    let rows: Option<Vec<Value>> = if normalized.eq_ignore_ascii_case("show tables") {
+        Some(
+            gitql_schema::tables()
+                .into_iter()
+                .map(|table| {
+                    let mut record = nu_protocol::Record::new();
+                    record.insert("table", Value::test_string(table.to_string()));
+                    Value::test_record(record)
+                })
+                .collect(),
+        )
+    } else {
+        let lower = normalized.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("describe ") {
+            let table = rest.trim();
+            gitql_schema::describe_table(table).map(|fields| {
+                fields
+                    .into_iter()
+                    .map(|(name, type_name)| {
+                        let mut record = nu_protocol::Record::new();
+                        record.insert("field", Value::test_string(name.to_string()));
+                        record.insert("type", Value::test_string(type_name));
+                        Value::test_record(record)
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        }
+    };
+
+    let rows = rows?;
+    match output_format {
+        OutputFormatKind::Table => Some(Value::test_list(rows)),
+        OutputFormatKind::JSON => render_value_list_to_json(&rows).map(Value::test_string),
+        OutputFormatKind::CSV => render_value_list_to_csv(&rows).map(Value::test_string),
+        OutputFormatKind::YAML => render_value_list_to_yaml(&rows).map(Value::test_string),
+    }
+}
+
+fn render_value_list_to_yaml(rows: &[Value]) -> Option<String> {
+    let mut elements: Vec<serde_yaml::Value> = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let record = row.as_record().ok()?;
+        let mut object = serde_yaml::Mapping::new();
+        for (name, value) in record.iter() {
+            object.insert(
+                serde_yaml::Value::String(name.clone()),
+                serde_yaml::Value::String(value.clone().coerce_into_string().unwrap_or_default()),
+            );
+        }
+        elements.push(serde_yaml::Value::Mapping(object));
+    }
+
+    serde_yaml::to_string(&elements).ok()
+}
+
+fn render_value_list_to_json(rows: &[Value]) -> Option<String> {
+    let mut elements = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let record = row.as_record().ok()?;
+        let mut object = serde_json::Map::new();
+        for (name, value) in record.iter() {
+            let string_value = value.clone().coerce_into_string().unwrap_or_default();
+            object.insert(name.clone(), serde_json::Value::String(string_value));
+        }
+        elements.push(serde_json::Value::Object(object));
+    }
+
+    serde_json::to_string(&serde_json::Value::Array(elements)).ok()
+}
+
+fn render_value_list_to_csv(rows: &[Value]) -> Option<String> {
+    let first_row = rows.first()?;
+    let first_record = first_row.as_record().ok()?;
+    let headers: Vec<String> = first_record.iter().map(|(name, _)| name.clone()).collect();
+
+    let mut writer = csv::Writer::from_writer(vec![]);
+    writer.write_record(&headers).ok()?;
+
+    for row in rows {
+        let record = row.as_record().ok()?;
+        let values: Vec<String> = record
+            .iter()
+            .map(|(_, value)| value.clone().coerce_into_string().unwrap_or_default())
+            .collect();
+        writer.write_record(values).ok()?;
+    }
+
+    writer
+        .into_inner()
+        .ok()
+        .and_then(|writer_content| String::from_utf8(writer_content).ok())
+}
+
+fn diagnostic_to_labeled_error(_query: &str, diagnostic: Diagnostic) -> LabeledError {
+    let mut error = LabeledError::new(diagnostic.message().to_string());
+    if let Some(location) = diagnostic.location() {
+        let span = Span::new(
+            location.column_start.saturating_sub(1) as usize,
+            location.column_end as usize,
+        );
+        error = error.with_label(diagnostic.label().to_string(), span);
+    }
+    if !diagnostic.helps().is_empty() {
+        error = error.with_help(diagnostic.helps().join(" "));
+    }
+    error
+}
+
+fn resolve_repo_path(repo: &str, current_dir: &str) -> String {
+    let repo_path = Path::new(repo);
+    if repo_path.is_absolute() {
+        repo.to_string()
+    } else {
+        Path::new(current_dir)
+            .join(repo_path)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Normalize repository flag inputs into an absolute set of paths.
+fn parse_repo_paths(
+    current_dir: &str,
+    repo_flag: Option<String>,
+    repos_flag: Option<Value>,
+) -> Result<Vec<String>, LabeledError> {
+    if let Some(repo) = repo_flag {
+        return Ok(vec![resolve_repo_path(&repo, current_dir)]);
+    }
+
+    if let Some(repos) = repos_flag {
+        let repos = repos
+            .as_list()
+            .map_err(|err| LabeledError::new(err.to_string()))?;
+        let repo_paths = repos
+            .iter()
+            .map(|value| {
+                value
+                    .clone()
+                    .coerce_into_string()
+                    .map_err(|err| LabeledError::new(err.to_string()))
+                    .map(|repo| resolve_repo_path(&repo, current_dir))
+            })
+            .collect::<Result<Vec<String>, LabeledError>>()?;
+
+        return Ok(repo_paths);
+    }
+
+    Ok(vec![current_dir.to_string()])
+}
+
+/// Resolve the output format name into a `OutputFormatKind`.
+fn resolve_output_format(output_flag: Option<String>) -> OutputFormatKind {
+    match output_flag.as_deref().map(str::to_lowercase).as_deref() {
+        Some("json") => OutputFormatKind::JSON,
+        Some("csv") => OutputFormatKind::CSV,
+        Some("yaml") | Some("yml") => OutputFormatKind::YAML,
+        _ => OutputFormatKind::Table,
+    }
+}
+
+fn validate_git_repositories(repositories: &[String]) -> Result<Vec<gix::Repository>, String> {
+    repositories
+        .iter()
+        .map(|repository| gix::open(repository).map_err(|err| err.to_string()))
+        .collect()
+}
+
+#[test]
+fn test_examples() -> Result<(), nu_protocol::ShellError> {
+    use nu_plugin_test_support::PluginTest;
+
+    // This will automatically run the examples specified in your command and compare their actual
+    // output against what was specified in the example. You can remove this test if the examples
+    // can't be tested this way, but we recommend including it if possible.
+
+    PluginTest::new("query git", GitqlPlugin.into())?.test_command_examples(&Gitql)
+}
+
+#[test]
+fn test_show_tables_schema_query() {
+    let value = render_schema_query("show tables", &OutputFormatKind::Table).unwrap();
+    let list = value.as_list().expect("expected list");
+    assert!(!list.is_empty());
+}
+
+#[test]
+fn test_describe_commits_schema_query() {
+    let value = render_schema_query("describe commits", &OutputFormatKind::Table).unwrap();
+    let list = value.as_list().expect("expected list");
+    assert!(list.iter().any(|row| {
+        row.as_record()
+            .ok()
+            .and_then(|record| record.get("field"))
+            .and_then(|value| value.as_str().ok())
+            .map_or(false, |field| field == "commit_id")
+    }));
+}
+
+#[test]
+fn test_describe_commits_schema_query_includes_repo_name() {
+    let value = render_schema_query("describe commits", &OutputFormatKind::Table).unwrap();
+    let list = value.as_list().expect("expected list");
+    assert!(list.iter().any(|row| {
+        row.as_record()
+            .ok()
+            .and_then(|record| record.get("field"))
+            .and_then(|value| value.as_str().ok())
+            .map_or(false, |field| field == "repo_name")
+    }));
+}
+
+#[test]
+fn test_describe_commits_yaml_schema_query() {
+    let yaml = render_schema_query("describe commits", &OutputFormatKind::YAML)
+        .unwrap()
+        .coerce_into_string()
+        .unwrap();
+    assert!(yaml.contains("repo_name"));
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn init_temp_repo() -> TempDir {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let repo_path = temp_dir.path();
+
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("git command failed");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+
+        run(&["init"]);
+        run(&["config", "user.name", "Test User"]);
+        run(&["config", "user.email", "test@example.com"]);
+        fs::write(repo_path.join("README.md"), "test repo").expect("write file");
+        run(&["add", "README.md"]);
+        run(&["commit", "-m", "initial commit"]);
+
+        temp_dir
+    }
+
+    #[test]
+    fn test_git_data_provider_includes_repo_name() {
+        let repo_dir = init_temp_repo();
+        let repo_path = repo_dir.path();
+        let repo_name = repo_path.file_name().unwrap().to_string_lossy().to_string();
+
+        let repo = gix::open(repo_path).expect("open repo");
+        let provider = GitDataProvider::new(vec![repo]);
+        let rows = provider
+            .provide(
+                "refs",
+                &[
+                    "name".to_string(),
+                    "repo".to_string(),
+                    "repo_name".to_string(),
+                ],
+            )
+            .expect("provide refs");
+
+        assert!(!rows.is_empty());
+        assert!(rows.iter().any(|row| {
+            row.values
+                .get(2)
+                .and_then(|value| value.as_text())
+                .map_or(false, |value| value == repo_name)
+        }));
+    }
+
+    #[test]
+    fn test_git_data_provider_commits_return_repo_fields() {
+        let repo_dir = init_temp_repo();
+        let repo_path = repo_dir.path();
+        let repo_name = repo_path.file_name().unwrap().to_string_lossy().to_string();
+
+        let repo = gix::open(repo_path).expect("open repo");
+        let provider = GitDataProvider::new(vec![repo]);
+        let rows = provider
+            .provide(
+                "commits",
+                &[
+                    "commit_id".to_string(),
+                    "repo".to_string(),
+                    "repo_name".to_string(),
+                ],
+            )
+            .expect("provide commits");
+
+        assert!(!rows.is_empty());
+        assert!(rows.iter().any(|row| {
+            row.values
+                .get(2)
+                .and_then(|value| value.as_text())
+                .map_or(false, |value| value == repo_name)
+        }));
+    }
+
+    #[test]
+    fn test_select_count_with_analysis_returns_value() {
+        let repo_dir = init_temp_repo();
+        let repo_path = repo_dir.path().to_string_lossy().to_string();
+        let repo = gix::open(&repo_path).expect("open repo");
+
+        let query_arguments = Arguments {
+            repos: vec![repo_path],
+            output_format: OutputFormatKind::Table,
+            pagination: false,
+            page_size: 10,
+            analysis: true,
+            enable_line_editor: false,
+        };
+
+        let schema = Schema {
+            tables_fields_names: tables_fields_names().to_owned(),
+            tables_fields_types: tables_fields_types().to_owned(),
+        };
+
+        let std_signatures = gitql_functions::gitql_std_signatures();
+        let std_functions = gitql_functions::gitql_std_functions();
+        let aggregation_signatures = aggregation_function_signatures();
+        let aggregation_functions = aggregation_functions();
+
+        let mut env = Environment::new(schema);
+        env.with_standard_functions(&std_signatures, std_functions);
+        env.with_aggregation_functions(&aggregation_signatures, aggregation_functions);
+
+        let value = execute_gitql_query(
+            "select count(*) from commits".to_string(),
+            &query_arguments,
+            &[repo],
+            &mut env,
+        )
+        .expect("execute query");
+
+        assert!(value.as_str().is_ok() || value.as_list().is_ok());
     }
 }
