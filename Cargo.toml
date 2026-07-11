@@ -1,6 +1,6 @@
 [package]
 name = "nu_plugin_query_git"
-version = "0.23.0"
+version = "0.24.0"
 authors = ["Darren Schroeder <343840+fdncred@users.noreply.github.com>"]
 edition = "2024"
 repository = "https://github.com/fdncred/nu_plugin_query_git"
@@ -11,11 +11,11 @@ license = "MIT"
 
 [dependencies]
 # nushell dependencies
-nu-plugin = "0.113.0"
-nu-protocol = "0.113.0"
-nu-path = "0.113.0"
+nu-plugin = "0.114.0"
+nu-protocol = "0.114.0"
+nu-path = "0.114.0"
 
-chrono = "0.4.44"
+chrono = "0.4.45"
 csv = "1.4.0"
 serde_yaml = "0.9.34+deprecated"
 gitql-ast = "0.39.0"
@@ -24,7 +24,7 @@ gitql-core = "0.20.0"
 gitql-engine = "0.43.0"
 gitql-parser = "0.42.0"
 gitql-std = "0.20.0"
-gix = "0.84.0"
+gix = "0.85.0"
 serde_json = "1.0.150"
 
 # for local development, you can use a path dependency
@@ -33,7 +33,7 @@ serde_json = "1.0.150"
 # nu-path =  { version = "0.99.0", path = "../nushell/crates/nu-path" }
 
 [dev-dependencies]
-nu-plugin-test-support =  "0.113.0"
+nu-plugin-test-support =  "0.114.0"
 tempfile = "3.27.0"
 # nu-plugin-test-support = { path = "../nushell/crates/nu-plugin-test-support" }
 
