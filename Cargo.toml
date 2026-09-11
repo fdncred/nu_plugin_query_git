@@ -24,7 +24,7 @@ gitql-core = "0.20.0"
 gitql-engine = "0.43.0"
 gitql-parser = "0.42.0"
 gitql-std = "0.20.0"
-gix = "0.86.0"
+gix = "0.87.1"
 serde_json = "1.0.151"
 
 # for local development, you can use a path dependency
