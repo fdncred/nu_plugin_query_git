@@ -356,7 +356,7 @@ fn select_diffs(repo: &gix::Repository, selected_columns: &[String]) -> Result<V
                         .for_each_to_obtain_tree_with_cache(
                             &current,
                             &mut rewrite_cache,
-                            |change| -> Result<_, Box<gix::object::blob::diff::init::Error>> {
+                            |change| -> gix::ExnResult<gix::object::tree::diff::Action> {
                                 files_changed += usize::from(change.entry_mode().is_no_tree());
                                 if select_insertions_or_deletions {
                                     if let Ok(mut platform) = change.diff(&mut diff_cache) {
