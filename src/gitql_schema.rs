@@ -1,5 +1,5 @@
 use gitql_ast::types::{
-    boolean::BoolType, date::DateType, integer::IntType, text::TextType, DataType,
+    DataType, boolean::BoolType, date::DateType, integer::IntType, text::TextType,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;

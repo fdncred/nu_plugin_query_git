@@ -1,4 +1,4 @@
-#![deny(clippy::unwrap_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![warn(clippy::unchecked_time_subtraction)]
 
 use crate::gitql_schema::{tables_fields_names, tables_fields_types};
@@ -10,8 +10,8 @@ use gitql_parser::diagnostic::Diagnostic;
 use gitql_parser::{parser, tokenizer};
 use gitql_std::aggregation::{aggregation_function_signatures, aggregation_functions};
 use nu_plugin::{
-    serve_plugin, EngineInterface, EvaluatedCall, MsgPackSerializer, Plugin, PluginCommand,
-    SimplePluginCommand,
+    EngineInterface, EvaluatedCall, MsgPackSerializer, Plugin, PluginCommand, SimplePluginCommand,
+    serve_plugin,
 };
 use nu_protocol::{Category, Example, LabeledError, Signature, Span, SyntaxShape, Value};
 use std::path::Path;
@@ -567,7 +567,7 @@ fn test_describe_commits_schema_query() {
             .ok()
             .and_then(|record| record.get("field"))
             .and_then(|value| value.as_str().ok())
-            .map_or(false, |field| field == "commit_id")
+            == Some("commit_id")
     }));
 }
 
@@ -580,7 +580,7 @@ fn test_describe_commits_schema_query_includes_repo_name() {
             .ok()
             .and_then(|record| record.get("field"))
             .and_then(|value| value.as_str().ok())
-            .map_or(false, |field| field == "repo_name")
+            == Some("repo_name")
     }));
 }
 
@@ -647,7 +647,7 @@ mod regression_tests {
             row.values
                 .get(2)
                 .and_then(|value| value.as_text())
-                .map_or(false, |value| value == repo_name)
+                .is_some_and(|value| value == repo_name)
         }));
     }
 
@@ -675,7 +675,7 @@ mod regression_tests {
             row.values
                 .get(2)
                 .and_then(|value| value.as_text())
-                .map_or(false, |value| value == repo_name)
+                .is_some_and(|value| value == repo_name)
         }));
     }
 

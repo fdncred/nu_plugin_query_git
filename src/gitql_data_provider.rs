@@ -1,7 +1,7 @@
 use gitql_core::object::Row;
 use gitql_core::values::{
-    boolean::BoolValue, datetime::DateTimeValue, integer::IntValue, null::NullValue,
-    text::TextValue, Value,
+    Value, boolean::BoolValue, datetime::DateTimeValue, integer::IntValue, null::NullValue,
+    text::TextValue,
 };
 use gitql_engine::data_provider::DataProvider;
 use gix::refs::Category;
@@ -358,13 +358,12 @@ fn select_diffs(repo: &gix::Repository, selected_columns: &[String]) -> Result<V
                             &mut rewrite_cache,
                             |change| -> gix::ExnResult<gix::object::tree::diff::Action> {
                                 files_changed += usize::from(change.entry_mode().is_no_tree());
-                                if select_insertions_or_deletions {
-                                    if let Ok(mut platform) = change.diff(&mut diff_cache) {
-                                        if let Ok(Some(counts)) = platform.line_counts() {
-                                            deletions += counts.removals;
-                                            insertions += counts.insertions;
-                                        }
-                                    }
+                                if select_insertions_or_deletions
+                                    && let Ok(mut platform) = change.diff(&mut diff_cache)
+                                    && let Ok(Some(counts)) = platform.line_counts()
+                                {
+                                    deletions += counts.removals;
+                                    insertions += counts.insertions;
                                 }
                                 Ok(std::ops::ControlFlow::Continue(()))
                             },

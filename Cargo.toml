@@ -68,3 +68,7 @@ bin-dir = "{ bin }{ binary-ext }"
 # gitql-engine = { git = "https://github.com/AmrDeveloper/GQL/", branch = "master" }
 # gitql-parser = { git = "https://github.com/AmrDeveloper/GQL/", branch = "master" }
 # gitql-std = { git = "https://github.com/AmrDeveloper/GQL/", branch = "master" }
+
+[lints.clippy]
+# ShellError is large by design and is part of the plugin API; nushell allows this lint too.
+result_large_err = "allow"

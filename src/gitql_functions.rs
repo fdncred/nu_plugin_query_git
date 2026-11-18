@@ -1,7 +1,7 @@
 use gitql_ast::types::text::TextType;
 use gitql_core::signature::{Signature, StandardFunction};
-use gitql_core::values::text::TextValue;
 use gitql_core::values::Value;
+use gitql_core::values::text::TextValue;
 use gitql_std::standard::{standard_function_signatures, standard_functions};
 use std::collections::HashMap;
 use std::sync::OnceLock;
